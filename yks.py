@@ -170,6 +170,7 @@ class StudyApp(ctk.CTk):
         self.time_left_seconds = self.pomodoro_work_duration_seconds
         self.is_timer_running = False
         self.is_timer_paused = False
+        self.session_initial_time_left = None  # Süre kaydı için
         self.current_pomodoro_task_id = None
         self.current_pomodoro_cycle = "work" # "work" veya "break"
 
@@ -242,6 +243,9 @@ class StudyApp(ctk.CTk):
         
         self.help_button = ctk.CTkButton(self.bottom_frame, text="Bir Konu Hakkında Yardım İste", command=self.show_help_message)
         self.help_button.pack(side="left", padx=10)
+
+        self.progress_button = ctk.CTkButton(self.bottom_frame, text="İlerleme", command=self.show_progress_window)
+        self.progress_button.pack(side="left", padx=10)
 
         self.total_time_label = ctk.CTkLabel(self.bottom_frame, text="Bugün Toplam Çalışılan: 0dk", font=ctk.CTkFont(size=14))
         self.total_time_label.pack(side="right", padx=10)
@@ -412,17 +416,20 @@ class StudyApp(ctk.CTk):
         if not self.current_pomodoro_task_id: return
         self.is_timer_running = True
         self.is_timer_paused = False
+        self.session_initial_time_left = self.time_left_seconds
         self.start_pause_button.configure(text="Duraklat")
         self.countdown()
 
     def pause_timer(self):
-        self.is_timer_paused = True
-        self.start_pause_button.configure(text="Devam Et")
         if self.timer_id:
             self.after_cancel(self.timer_id)
+        self.record_elapsed_time()
+        self.is_timer_paused = True
+        self.start_pause_button.configure(text="Devam Et")
 
     def resume_timer(self):
         self.is_timer_paused = False
+        self.session_initial_time_left = self.time_left_seconds
         self.start_pause_button.configure(text="Duraklat")
         self.countdown()
         
@@ -431,6 +438,7 @@ class StudyApp(ctk.CTk):
         if self.timer_id:
             self.after_cancel(self.timer_id)
             self.timer_id = None
+        self.record_elapsed_time()
         self.is_timer_running = False
         self.is_timer_paused = False
         self.time_left_seconds = self.pomodoro_work_duration_seconds
@@ -452,6 +460,7 @@ class StudyApp(ctk.CTk):
         if self.timer_id:
             self.after_cancel(self.timer_id)
             self.timer_id = None
+        self.record_elapsed_time()
         self.is_timer_running = False
         self.is_timer_paused = False
 
@@ -490,11 +499,8 @@ class StudyApp(ctk.CTk):
                     return
 
                 if self.current_pomodoro_cycle == "work":
-                    task["time_spent_min"] = task.get("time_spent_min", 0) + (self.pomodoro_work_duration_seconds // 60)
+                    self.record_elapsed_time()
                     task["pomodoro_sessions"] = task.get("pomodoro_sessions", 0) + 1
-                    self.save_plan_data()
-                    self.update_task_widget_display(task["id"]) # İlgili görevin etiketlerini güncelle
-                    self.update_total_time_today()
 
 
                     messagebox.showinfo("Mola Zamanı!", f"Çalışma seansı bitti. Şimdi {self.pomodoro_break_duration_seconds // 60} dakika mola!")
@@ -546,6 +552,24 @@ class StudyApp(ctk.CTk):
                 if task["id"] == task_id:
                     return task
         return None
+
+    def record_elapsed_time(self):
+        if (
+            self.current_pomodoro_cycle == "work"
+            and self.current_pomodoro_task_id
+            and self.session_initial_time_left is not None
+        ):
+            elapsed = self.session_initial_time_left - self.time_left_seconds
+            if elapsed > 0:
+                task = self.get_task_by_id(self.current_pomodoro_task_id)
+                if task:
+                    minutes = elapsed // 60
+                    if minutes > 0:
+                        task["time_spent_min"] = task.get("time_spent_min", 0) + minutes
+                        self.save_plan_data()
+                        self.update_task_widget_display(task["id"])
+                        self.update_total_time_today()
+            self.session_initial_time_left = self.time_left_seconds
         
     def save_current_task_note(self):
         if self.current_pomodoro_task_id:
@@ -583,6 +607,45 @@ class StudyApp(ctk.CTk):
             "Uygulamadaki görevi seçerek 'Çalışmaya Başla' butonu ile Pomodoro zamanlayıcısını kullanabilir, notlarını girebilirsin."
         )
         messagebox.showinfo("Yardım ve Destek", message)
+
+    def calculate_streak(self):
+        streak = 0
+        for day in reversed(self.plan_data):
+            if any(task.get("pomodoro_sessions", 0) > 0 for task in day["tasks"]):
+                streak += 1
+            else:
+                break
+        return streak
+
+    def show_progress_window(self):
+        win = ctk.CTkToplevel(self)
+        win.title("Genel İlerleme")
+        win.geometry("400x500")
+
+        total_tasks = sum(len(day["tasks"]) for day in self.plan_data)
+        completed_tasks = sum(
+            1 for day in self.plan_data for task in day["tasks"] if task.get("status") == "Tamamlandı"
+        )
+        progress_ratio = completed_tasks / total_tasks if total_tasks else 0
+
+        ctk.CTkLabel(win, text="Plan İlerlemesi", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(10,0))
+        progress_bar = ctk.CTkProgressBar(win, width=300)
+        progress_bar.pack(pady=5)
+        progress_bar.set(progress_ratio)
+        ctk.CTkLabel(win, text=f"{completed_tasks}/{total_tasks} görev tamamlandı").pack(pady=(0,10))
+
+        streak = self.calculate_streak()
+        ctk.CTkLabel(win, text=f"Çalışma Serisi: {streak} gün", font=ctk.CTkFont(size=14)).pack(pady=(0,10))
+
+        subject_times = {}
+        for day in self.plan_data:
+            for task in day["tasks"]:
+                subject = task.get("subject", "")
+                subject_times[subject] = subject_times.get(subject, 0) + task.get("time_spent_min", 0)
+
+        ctk.CTkLabel(win, text="Harcanan Süreler", font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(10,0))
+        for subj, minutes in subject_times.items():
+            ctk.CTkLabel(win, text=f"{subj}: {self.format_time_display(minutes)}", anchor="w").pack(fill="x", padx=20)
 
     def prev_day(self):
         if self.is_timer_running and not self.is_timer_paused :
